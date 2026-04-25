@@ -17,7 +17,7 @@
   <!-- ========================================================= -->
 
   <!-- === iOS Web App 專屬設定 === -->
-  <meta name="apple-mobile-web-app-title" content="AI+輔導手札＆親師聯繫" />
+  <meta name="apple-mobile-web-app-title" content="AI+輔導手札" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 
@@ -297,7 +297,6 @@
 
       const [aiCategories, setAiCategories] = useState(() => { try { const saved = localStorage.getItem('louisaAiCategories'); return saved ? JSON.parse(saved) : defaultAiCategories; } catch(e) { return defaultAiCategories; } });
       const [aiActionsConfig, setAiActionsConfig] = useState(() => { try { const saved = localStorage.getItem('louisaAiActions'); return saved ? JSON.parse(saved) : defaultAiActions; } catch(e) { return defaultAiActions; } });
-      // 💡 重新加回：Gemini API Key 狀態
       const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('louisaGeminiApiKey') || '');
 
       useEffect(() => { localStorage.setItem('louisaClassroomStudentCount', studentCount.toString()); }, [studentCount]);
@@ -308,7 +307,6 @@
       useEffect(() => { localStorage.setItem('louisaGradeOptions', JSON.stringify(gradeOptions)); }, [gradeOptions]);
       useEffect(() => { localStorage.setItem('louisaAiCategories', JSON.stringify(aiCategories)); }, [aiCategories]);
       useEffect(() => { localStorage.setItem('louisaAiActions', JSON.stringify(aiActionsConfig)); }, [aiActionsConfig]);
-      // 💡 重新加回：自動儲存 API Key 到瀏覽器
       useEffect(() => { localStorage.setItem('louisaGeminiApiKey', geminiApiKey); }, [geminiApiKey]);
 
       const [activeTab, setActiveTab] = useState('add'); 
@@ -709,7 +707,6 @@
           }
       };
 
-      // 💡 新增：統一的姓名遮蔽與格式化邏輯
       const getStudentDisplayName = (seat, name, format) => {
           if (!name) return `${seat}號`;
           if (format === 'masked_name') {
@@ -720,9 +717,7 @@
           if (format === 'seat_last_name') {
               return `${seat}號${name[0]}生`;
           }
-          if (format === 'name') return name;
           if (format === 'seat') return `${seat}號`;
-          if (format === 'seat_name') return `${seat}號 ${name}`;
           if (format === 'anonymous') return '該生';
           return name;
       };
@@ -733,7 +728,6 @@
               const currentSeat = selectedSeatsArray[aiQueueIndex];
               const nextSeat = selectedSeatsArray[aiQueueIndex + 1];
               
-              // 使用自訂隱私格式取得精確名稱以進行替換
               const currentStudentName = getStudentDisplayName(currentSeat, roster[currentSeat], aiNameFormat);
               const nextStudentName = getStudentDisplayName(nextSeat, roster[nextSeat], aiNameFormat);
               
@@ -757,7 +751,6 @@
                   setIsGeneratingAI(false);
                   return;
               }
-              // 💡 套用新的隱私名稱格式
               finalNames = getStudentDisplayName(seats[0], roster[seats[0]], aiNameFormat);
               setAiQueueIndex(0); 
           } else {
@@ -776,8 +769,7 @@
               return;
           }
 
-          // 💡 修正：更新提示文字，引導至同頁面上方輸入
-          if (!geminiApiKey) {
+          if (!geminiApiKey || !geminiApiKey.trim()) {
               setAiGeneratedText("⚠️ 尚未設定 Gemini API 金鑰！\n請在上方「🔑 AI 智能金鑰設定」區塊，貼上您的免費金鑰後再試一次。");
               setIsGeneratingAI(false);
               return;
@@ -809,18 +801,25 @@
               for (let i = 0; i < maxRetries; i++) {
                   try {
                       const response = await fetch(url, options);
-                      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                      if (!response.ok) {
+                          const errData = await response.json().catch(() => ({}));
+                          const errMsg = errData.error?.message || `HTTP ${response.status} 錯誤`;
+                          const err = new Error(errMsg);
+                          // 💡 如果是 4xx 錯誤 (如 400 金鑰無效, 403 權限不足)，代表不是網路不穩，直接中斷不重試
+                          if (response.status >= 400 && response.status < 500) err.isClientError = true;
+                          throw err;
+                      }
                       return await response.json();
                   } catch (error) {
-                      if (i === maxRetries - 1) throw error;
+                      if (error.isClientError || i === maxRetries - 1) throw error;
                       await new Promise(resolve => setTimeout(resolve, delays[i]));
                   }
               }
           };
 
           try {
-              // 💡 確保 URL 中使用的是使用者設定的 geminiApiKey
-              const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
+              // 💡 加入 .trim() 確保複製貼上時沒有多餘的空白字元
+              const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey.trim()}`;
               const result = await fetchWithRetry(url, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -834,7 +833,16 @@
                   setAiGeneratedText("⚠️ 生成失敗，請稍後再試。");
               }
           } catch (error) {
-              setAiGeneratedText("⚠️ 發生錯誤，無法連線到 AI 服務。請確認您的網路狀態與 API 金鑰是否正確。");
+              console.error("AI Generation Error:", error);
+              let errorMsg = `⚠️ API 連線錯誤：${error.message}`;
+              if (error.message === 'Failed to fetch') {
+                  errorMsg = "⚠️ 無法連線到 Google AI 伺服器！\n👉 解決方法：請確認您的網路狀態，並檢查是否被「擋廣告外掛」或「防護軟體」阻擋連線。";
+              } else if (error.message.includes('API key not valid')) {
+                  errorMsg = "⚠️ API 金鑰無效！\n👉 解決方法：請確認上方的「API 金鑰」是否複製完整，或者可能填到了舊的無效金鑰。";
+              } else {
+                  errorMsg += "\n\n👉 解決方法：請確認上方的金鑰正確且網路狀態正常。";
+              }
+              setAiGeneratedText(errorMsg);
           } finally {
               setIsGeneratingAI(false);
           }
@@ -1193,7 +1201,10 @@
                     <div className="rounded-full bg-[#FFF5BA] border-[1.5px] border-[#5C3A21]"></div>
                     <div className="rounded-full bg-[#C7CEEA] border-[1.5px] border-[#5C3A21]"></div>
                   </div>
-                  AI+輔導手札＆親師聯繫
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+                    <span>AI+輔導手札＆親師聯繫</span>
+                    {isAdmin && <span className="text-[11px] bg-[#C84B31] text-white px-2 py-0.5 rounded-md font-bold tracking-normal shadow-sm w-fit">👑 創作者</span>}
+                  </div>
                 </h1>
                 <button onClick={handleOpenCoffeeBreak} className="flex items-center gap-2 px-3 py-1.5 bg-[#FFFBF5] border-2 border-[#5C3A21] rounded-lg shadow-[3px_3px_0_#5C3A21] active:translate-y-1 active:translate-x-1 active:shadow-none transition-all text-[#5C3A21] font-bold text-sm">
                   <Coffee size={16} /> 休息
@@ -1318,7 +1329,7 @@
                    <button onClick={() => { setAiMode('batch'); setAiQueueIndex(0); }} className={`pb-3 text-[17px] font-black transition-all ${aiMode === 'batch' ? 'text-[#d81b60] border-b-4 border-[#d81b60]' : 'text-gray-400 hover:text-gray-600'}`}>批次處理</button>
                 </div>
 
-                {/* 💡 移至此處：AI 智能金鑰輸入介面 (融入 AI 分頁的粉紅視覺風格) */}
+                {/* 💡 AI 智能金鑰輸入介面 */}
                 <div className="bg-white rounded-[24px] p-6 sm:p-8 shadow-sm border border-pink-100 mb-6 relative overflow-hidden">
                   <div className="absolute top-0 left-0 w-2 h-full bg-[#d81b60]"></div>
                   <h3 className="text-xl font-black mb-3 flex items-center gap-2.5 text-[#333]">
@@ -1506,7 +1517,7 @@
                          紀錄預覽畫布
                       </h3>
                       
-                      {/* 模式切換按鈕 (只在有內容時顯示完整樣式) */}
+                      {/* 模式切換按鈕 */}
                       <div className="flex bg-gray-50 p-1 rounded-xl border border-gray-200">
                          <button 
                             onClick={() => setAiPreviewMode('text')} 
@@ -1537,7 +1548,9 @@
                            <div className="bg-[#FFF5BA]/40 border-[2.5px] border-[#FFF5BA] rounded-xl p-4 mb-4 shadow-sm animate-fade-in flex flex-wrap justify-between items-center gap-3">
                              <span className="font-bold text-[#C84B31] text-[15px] flex items-center gap-1.5">
                                <ListChecks size={18}/> 進度 {aiQueueIndex + 1} / {aiStudentSeat.split(', ').length} ➜ 目前載入：
-                               <span className="bg-white px-2 py-0.5 rounded border border-[#C84B31]">{roster[aiStudentSeat.split(', ')[aiQueueIndex]] || aiStudentSeat.split(', ')[aiQueueIndex]}</span>
+                               <span className="bg-white px-2 py-0.5 rounded border border-[#C84B31]">
+                                 {getStudentDisplayName(aiStudentSeat.split(', ')[aiQueueIndex], roster[aiStudentSeat.split(', ')[aiQueueIndex]], aiNameFormat)}
+                               </span>
                              </span>
                              <button onClick={handleNextAiQueue} disabled={aiQueueIndex === aiStudentSeat.split(', ').length - 1} className="text-sm px-4 py-2 bg-white border-[2px] border-[#5C3A21] rounded-lg text-[#5C3A21] font-bold shadow-[2px_2px_0_#5C3A21] active:shadow-none active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed">
                                跳過此人
@@ -1560,7 +1573,6 @@
                                   <AlertCircle size={14}/> 可直接在上方畫布手動修改文字 (若為批次模式，修改後請勿刪除學生姓名，以免替換失敗)
                                </div>
 
-                               {/* 💡 AI 分頁按鈕支援 RWD (手機版自動變一列四格) */}
                                <div className="grid grid-cols-4 gap-2 sm:gap-3 mt-6 pt-6 border-t border-dashed border-gray-200">
                                   <button onClick={() => handleSaveAILog(false)} className="w-full py-2 sm:py-3.5 min-h-[64px] sm:min-h-[52px] bg-[#FFF5BA] border-[2px] sm:border-[2.5px] border-[#5C3A21] text-[#5C3A21] font-bold rounded-xl shadow-[2px_2px_0_#5C3A21] sm:shadow-[3px_3px_0_#5C3A21] active:shadow-none active:translate-y-px flex flex-col sm:flex-row justify-center items-center gap-1 sm:gap-1.5 transition-all text-[12px] sm:text-[15px] px-1">
                                     {aiCopied ? <CheckCircle2 size={18} className="text-green-600 shrink-0"/> : <Copy size={18} className="shrink-0" />} 
@@ -1736,7 +1748,6 @@
                       <textarea value={contactDraft} onChange={e => setContactDraft(e.target.value)} className="w-full h-56 bg-[#FFFBF5] border-[2.5px] border-[#5C3A21] p-4 text-lg rounded-xl font-medium leading-relaxed shadow-[inset_2px_2px_5px_rgba(0,0,0,0.05)] focus:outline-none focus:ring-2 focus:ring-[#FFB7B2]" placeholder="請選擇範本或直接在此輸入文字..." />
                     </div>
 
-                    {/* 💡 聯繫分頁按鈕支援 RWD (手機版自動變一列四格) */}
                     <div className="grid grid-cols-4 gap-2 sm:gap-4">
                        <button onClick={() => handleCopyAndSaveLog(false)} className="w-full py-2 sm:py-3.5 min-h-[64px] sm:min-h-[56px] bg-[#FFF5BA] border-[2px] sm:border-[2.5px] border-[#5C3A21] text-[#5C3A21] font-bold rounded-xl shadow-[2px_2px_0_#5C3A21] sm:shadow-[3px_3px_0_#5C3A21] active:shadow-none active:translate-y-px flex flex-col sm:flex-row justify-center items-center gap-1 sm:gap-1.5 transition-all text-[12px] sm:text-[15px] px-1">
                          {isCopied ? <CheckCircle2 size={18} className="text-green-600 shrink-0"/> : <Copy size={18} className="shrink-0"/>} 
@@ -2001,8 +2012,6 @@
                   <p className="text-[15px] text-[#8C7A6B] mb-5 font-bold">若您要將裝置借給他人，可點擊下方按鈕將系統上鎖。</p>
                   <button onClick={handleLogout} className="w-full py-4 min-h-[56px] bg-[#FFDAC1] border-[2.5px] border-[#5C3A21] rounded-xl font-black shadow-[4px_4px_0_#5C3A21] active:translate-y-1 active:shadow-none flex justify-center items-center gap-2 transition-colors text-lg"><Lock size={20} /> 鎖定系統 (需重新輸入密碼)</button>
                 </div>
-
-                {/* (已移除此處的 API 金鑰區塊) */}
 
                 <div className="bg-[#FFFBF5] border-[3px] border-[#5C3A21] rounded-2xl p-6 shadow-[6px_6px_0_#5C3A21]">
                   <h2 className="text-xl font-bold mb-4 flex items-center gap-2 text-[#5C3A21] border-b-2 border-[#D5C8BA] pb-3"><Users /> 班級名單設定</h2>
